@@ -8,6 +8,25 @@ tripod_gait = [	0.15, 0, 0.05, 0.5, 0.5, # leg 1
 				0.15, 0, 0.05, 0.5, 0.5, # leg 5
 				0.15, 0, 0.05, 0.0, 0.5] # leg 6
 
+wave_gait = [
+				0.15, 0, 0.03, 0/6, 5/6,
+				0.15, 0, 0.03, 1/6, 5/6,
+				0.15, 0, 0.03, 2/6, 5/6,
+				0.15, 0, 0.03, 3/6, 5/6,
+				0.15, 0, 0.03, 4/6, 5/6,
+				0.15, 0, 0.03, 5/6, 5/6
+			]
+
+tetrapod_gait = [
+				0.15, 0, 0.05, 0/3, 2/3,  # leg 1 (LF)
+				0.15, 0, 0.05, 1/3, 2/3,  # leg 2 (LM)
+				0.15, 0, 0.05, 2/3, 2/3,  # leg 3 (LR)
+				0.15, 0, 0.05, 0/3, 2/3,  # leg 4 (RF)
+				0.15, 0, 0.05, 1/3, 2/3,  # leg 5 (RM)
+				0.15, 0, 0.05, 2/3, 2/3   # leg 6 (RR)
+			]
+
+
 stationary = [0.18, 0, 0, 0, 0] * 6
 
 #Radius: Determines how far the leg moves outward from the center
@@ -17,7 +36,7 @@ stationary = [0.18, 0, 0, 0, 0] * 6
 #Duty Factor: The fraction of time a leg spends on the ground
 
 class Controller:
-	def __init__(self, params=tripod_gait, crab_angle=0.0, body_height=0.14, period=1.0, velocity=0.1, dt=1/240):
+	def __init__(self, params=tetrapod_gait, crab_angle=0.0, body_height=0.14, period=1.0, velocity=0.1, dt=1/240):
 		#params= tripod_gait
 		#crab_angle=0.0: Controls the walking direction. A value of 0° means forward walking
 		#body_height=0.14: The default height of the robot's body from the ground
@@ -28,6 +47,10 @@ class Controller:
 		self.l_1 = 0.05317 # link lengths of each leg
 		self.l_2 = 0.10188
 		self.l_3 = 0.14735
+
+		#self.l_1 = 0.05317 # link lengths of each leg
+		#self.l_2 = 0.10188
+		#self.l_3 = 0.14735
 
 		self.dt = dt # gait Control Variables
 		self.period = period
@@ -47,6 +70,7 @@ class Controller:
 		# 6 represents the six legs of the hexapod
 		# 5 represents different phases or parameters for the gait
 
+
 		for leg_index in range(6): # generates and verifies leg trajectories
 			foot_positions, foot_velocities = self.__leg_traj(leg_index, params[leg_index]) # calculates the foot trajectory (positions and velocities) for each leg based on its gait parameters
 
@@ -61,6 +85,9 @@ class Controller:
 			self.velocities = np.append(self.velocities, foot_velocities, axis=0)
 			self.angles = np.append(self.angles, joint_angles, axis=0)
 			self.speeds = np.append(self.speeds, joint_speeds, axis=0)
+
+		#self.precompute_gaits()
+
 
 
 	def joint_angles(self, t): # retrieves joint angles at a specific time t
@@ -200,7 +227,7 @@ class Controller:
 
 	def IMU_feedback(self, measured_attitude):
 		return
-
+	
 def reshape(x): # converts and scales an input array x into Body Height, Velocity, Leg Gait Parameters 
 		
 		x = np.array(x) #convert Input to NumPy Array
@@ -214,7 +241,7 @@ def reshape(x): # converts and scales an input array x into Body Height, Velocit
 		param_min = np.array([0.0, -1.745, 0.01, 0.0, 0.0]) # min allowed values for each parameter
 		param_max = np.array([0.3, 1.745, 0.2, 1.0, 1.0]) # max allowed values for each parameter
 		
-		leg_params = leg_params * (param_max - param_min) + param_min # scales ans shifts each parameter to its proper range
+		leg_params = leg_params * (param_max - param_min) + param_min # scales and shifts each parameter to its proper range
 
 		return height, velocity, leg_params
 
@@ -229,6 +256,7 @@ if __name__ == '__main__':
 	0.1, 0, 0.1, 0.5, 0.5, # leg 3
 	0.1, 0, 0.1, 0.0, 0.5, # leg 4
 	0.1, 0, 0.1, 0.5, 0.5] # leg 5
+
 
 	start = time.perf_counter()
 	ctrl = Controller(leg_params) # initializes Controller

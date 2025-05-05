@@ -6,6 +6,9 @@
   <mesh filename="package://urdf/meshes/simplified/femur_mesh_v1 v1.STL" scale="0.1 0.1 0.1"/>
   <mesh filename="package://urdf/meshes/simplified/tibia_mesh_v1 v1.STL" scale="0.1 0.1 0.1"/>-->
 
+  <!--to change tibia length, change x, mass value="0.15389"-->
+  <!--to change femur length, change x, <mass value="0.05752", xyz="0.10188 0 0"-->
+
   <!-- COLOURS -->
   <material name="body">
     <color rgba="0.2 0.2 0.2 1" />
@@ -116,7 +119,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="package://urdf/meshes/simplified/tibia_mesh_v1 v1.STL" scale="0.1 0.1 0.1" />
+        <mesh filename="package://urdf/meshes/simplified/tibia_mesh_v1 v1.STL" scale="0.1 0.1 0.1"/>
       </geometry>
     </collision>
   </link>

@@ -5,6 +5,7 @@ import numpy as np
 import time
 import os
 from scipy.spatial import ConvexHull
+from matplotlib.path import Path
 
 class Simulator:
     def __init__(self, controller, urdf='/urdf/hexapod_simplified.urdf', visualiser=False, follow=True, collision_fatal=True, camera_position=[0, 0, 0], camera_distance=0.7, camera_yaw=20, camera_pitch=-30): #initialize values
@@ -59,6 +60,7 @@ class Simulator:
         self.__init_joints(self.controller, self.joints)
         self.__init_links(self.links)
 
+        self.debug_lines = []
 	# set joints to their initial positions
     def __init_joints(self, controller, joints):
         joint_angles = controller.joint_angles(t=0)
@@ -171,23 +173,199 @@ class Simulator:
         self.n_step += 1
         self.t += self.dt
 	
-    def supporting_legs(self): # determines which legs of the hexapod are currently in contact with the ground
-		
-        tibia_links = self.links[:, 2] #extracts the tibia links of each leg
-          
-        contact_points = np.array(self.client.getContactPoints(self.hexId, self.groundId), dtype=object) # returns a list of all contact points between the hexapod and ground
+    def supporting_legs(self):
+        
+        tibia_links = self.links[:, 2]  # Extract tibia link indices
+        contact_points = self.client.getContactPoints(self.hexId)  # Get all contact points for the hexapod
 
-        try:
-            contact_links = contact_points[:, 3] # extracts the link indices in contact with the ground
-        except IndexError as e: 
-            contact_links = np.array([])
-               
-        supporting_legs = np.isin(tibia_links, contact_links) # which legs are in contact with the ground
-          #True: The tibia is touching the ground
-          #False: The tibia is in the air
+        contact_links = []
+        for cp in contact_points:
+            if cp[3] in tibia_links and cp[2] != self.hexId:  # Check if the link is a tibia and touching something external
+                contact_links.append(cp[3])
+
+        contact_links = np.array(contact_links)
+        supporting_legs = np.isin(tibia_links, contact_links)  # Boolean mask for supporting legs
 
         return supporting_legs
+    
+    def static_stability_analysis(self):
+        supporting_legs = self.supporting_legs()
+        foot_positions = []
 
+        for leg_idx, is_supporting in enumerate(supporting_legs):
+            if is_supporting:
+                link_index = self.links[leg_idx, 2]  # Tibia link index
+                pos, _ = self.client.getLinkState(self.hexId, link_index)[:2]
+                foot_positions.append(pos)  # Keep full 3D coords
+
+        if len(foot_positions) < 3:
+            return False  # Not enough points for a polygon
+
+        foot_positions = np.array(foot_positions)
+
+        # --- Step 1: Fit best-fit plane to support feet ---
+        centroid = np.mean(foot_positions, axis=0)
+        centered = foot_positions - centroid
+        _, _, vh = np.linalg.svd(centered)
+        normal = vh[-1]  # Normal vector of the plane
+
+        # --- Step 2: Project CoM onto plane ---
+        com_3d = np.array(self.base_pos())
+        vec = com_3d - centroid
+        distance = np.dot(vec, normal)
+        com_proj = com_3d - distance * normal  # Projected CoM on plane
+
+        # --- Step 3: Convert to 2D local coords for polygon test ---
+        # Choose local X, Y axes in the plane
+        u = vh[0]  # First principal direction
+        v = vh[1]  # Second principal direction
+
+        def to_2d(pt):
+            vec = pt - centroid
+            return np.dot(vec, u), np.dot(vec, v)
+
+        foot_2d = np.array([to_2d(p) for p in foot_positions])
+        com_2d = to_2d(com_proj)
+
+        # --- Step 4: Convex Hull check ---
+        hull = ConvexHull(foot_2d)
+        hull_path = foot_2d[hull.vertices]
+        polygon = Path(hull_path)
+
+        return polygon.contains_point(com_2d, radius=0.03)
+    
+    def zmp_stability_analysis(self):
+        supporting_legs = self.supporting_legs()
+        foot_positions = []
+
+        for leg_idx, is_supporting in enumerate(supporting_legs):
+            if is_supporting:
+                link_index = self.links[leg_idx, 2]  # Tibia link index
+                pos, _ = self.client.getLinkState(self.hexId, link_index)[:2]
+                foot_positions.append(pos)
+
+        if len(foot_positions) < 3:
+            return False  # Not stable if fewer than 3 support points
+
+        foot_positions = np.array(foot_positions)  # shape (N, 3)
+
+        # Define the plane from the support polygon (best fit)
+        def best_fit_plane(points):
+            centroid = np.mean(points, axis=0)
+            _, _, vh = np.linalg.svd(points - centroid)
+            normal = vh[-1]
+            return normal, centroid
+
+        normal, origin = best_fit_plane(foot_positions)
+
+        # Construct projection basis
+        normal = normal / np.linalg.norm(normal)
+        z_axis = normal
+        arbitrary = np.array([1.0, 0.0, 0.0])
+        if np.allclose(normal, arbitrary):
+            arbitrary = np.array([0.0, 1.0, 0.0])
+        x_axis = np.cross(arbitrary, z_axis)
+        x_axis /= np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis /= np.linalg.norm(y_axis)
+
+        basis = np.stack([x_axis, y_axis, z_axis], axis=1)
+
+        def project_to_plane(p):
+            relative = p - origin
+            return basis.T @ relative  # 3D point → local (x, y, z)
+
+        # Project all foot positions and ZMP into 2D in-plane coords
+        foot_2d = np.array([project_to_plane(p)[:2] for p in foot_positions])
+
+        # --- ZMP Calculation ---
+        com_pos, _ = self.client.getBasePositionAndOrientation(self.hexId)
+        com_vel, com_ang_vel = self.client.getBaseVelocity(self.hexId)
+        mass = 1.68
+        g = 9.81
+
+        zmp_world = np.array([
+            com_pos[0] - (com_vel[0] * com_ang_vel[1]) / g,
+            com_pos[1] - (com_vel[1] * com_ang_vel[0]) / g,
+            com_pos[2]
+        ])
+        zmp_2d = project_to_plane(zmp_world)[:2]
+
+        # --- Hull & containment check ---
+        hull = ConvexHull(foot_2d)
+        hull_path = foot_2d[hull.vertices]
+
+        def point_in_hull(point, hull_points, margin=0.03):
+            polygon = Path(hull_points)
+            return polygon.contains_point(point, radius=margin)
+
+        return point_in_hull(zmp_2d, hull_path)
+
+
+    '''def static_stability_analysis(self):
+    
+        supporting_legs = self.supporting_legs()
+        foot_positions = []
+
+        for leg_idx, is_supporting in enumerate(supporting_legs):
+            if is_supporting:
+                link_index = self.links[leg_idx, 2]  # Tibia link index
+                pos, _ = self.client.getLinkState(self.hexId, link_index)[:2]
+                foot_positions.append(pos[:2])  # Store only x, y coordinates
+
+        if len(foot_positions) < 3:
+            return False  # Not statically stable if fewer than 3 support points
+
+        foot_positions = np.array(foot_positions)
+        com = np.array(self.base_pos()[:2])  # Project CoM onto the ground (x, y only)
+        
+        # Compute convex hull and visualize it
+        hull = ConvexHull(foot_positions)
+        hull_path = foot_positions[hull.vertices]
+       
+        def point_in_hull(point, hull_points, margin=0.03):
+            polygon = Path(hull_points)
+            return polygon.contains_point(point, radius=margin)
+
+        #def point_in_hull(point, hull_points):
+            #return Path(hull_points).contains_point(point)
+
+        return point_in_hull(com, hull_path)'''
+    
+    '''def zmp_stability_analysis(self):
+        supporting_legs = self.supporting_legs()
+        foot_positions = []
+
+        for leg_idx, is_supporting in enumerate(supporting_legs):
+            if is_supporting:
+                link_index = self.links[leg_idx, 2]  # Tibia link index
+                pos, _ = self.client.getLinkState(self.hexId, link_index)[:2]
+                foot_positions.append(pos[:2])  # Store only x, y coordinates
+
+        if len(foot_positions) < 3:
+            return False  # Not stable if fewer than 3 support points
+
+        foot_positions = np.array(foot_positions)
+        hull = ConvexHull(foot_positions)
+        hull_path = foot_positions[hull.vertices]
+        
+        # Compute ZMP using Newton-Euler equations
+        com_pos, _ = self.client.getBasePositionAndOrientation(self.hexId)
+        com_vel, com_ang_vel = self.client.getBaseVelocity(self.hexId)
+        mass = 1.68
+        g = 9.81  # Gravity
+        
+        zmp_x = com_pos[0] - (com_vel[0] * com_ang_vel[1]) / g
+        zmp_y = com_pos[1] - (com_vel[1] * com_ang_vel[0]) / g
+        zmp = np.array([zmp_x, zmp_y])
+        
+        def point_in_hull(point, hull_points, margin=0.03):
+            polygon = Path(hull_points)
+            return polygon.contains_point(point, radius=margin)
+
+        return point_in_hull(zmp, hull_path)'''
+        
+        
     def __link_collision(self): # returns true for collision between links in robot
 
         contact_points = np.asarray(self.client.getContactPoints(self.hexId, self.hexId), dtype=object) # checks for collisions within the hexapod itself
@@ -253,7 +431,7 @@ if __name__ == "__main__":
         from controllers.my_kin import Controller
         from controllers.my_kin import stationary
 	
-        controller = Controller(stationary, body_height=0.11, velocity=0.0, crab_angle=-np.pi/6)
+        controller = Controller(stationary, body_height=0.15, velocity=0.0, crab_angle=-np.pi/6)
         #stationary: No movement (legs stay in place)
         #body_height=0.11: The hexapod's body is 11 cm above the ground
         #velocity=0.0: The robot does not move (static pose)
@@ -268,4 +446,6 @@ if __name__ == "__main__":
 
         while True:
 		        my_sim.step()   
+                    
+
 
